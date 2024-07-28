@@ -1,0 +1,26 @@
+[package]
+name = "hashmob"
+version = "0.1.0"
+edition = "2021"
+authors = ["Volker Schwaberow <volker@schwaberow.de>"]
+license = "MIT"
+
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true 
+
+[dependencies]
+clap = { version = "4.5.11", features = ["cargo", "env", "derive"] }
+colored = "2.1.0"
+colored_json = "5.0.0"
+indicatif = { version = "0.17.8", features = ["tokio"] }
+reqwest = { version = "0.12.5", features = ["json"] }
+serde = { version = "1.0.204", features = ["derive"] }
+serde_json = "1.0.120"
+dirs = "5.0"
+atty = "0.2"
+thiserror = "1.0.63"
+tokio = { version = "1.39.2", features = ["full", "io-std"] }
