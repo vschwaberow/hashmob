@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Volker Schwaberow <volker@schwaberow.de>"]
 license = "MIT"
+description = "a cli tool to search hashes on hashmob"
 
 [profile.release]
 opt-level = 'z'
