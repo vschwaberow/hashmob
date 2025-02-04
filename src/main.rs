@@ -22,7 +22,7 @@ enum HashMobError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("Environment variable error: {0}")]
-    EnvVar(#[from] std::env::VarError),
+    EnvVar(#[from] env::VarError),
     #[error("No input provided")]
     NoInput,
     #[error("Colored JSON error: {0}")]
@@ -53,7 +53,7 @@ struct Found {
 #[tokio::main]
 async fn main() -> Result<(), HashMobError> {
     let matches = Command::new("HashMob Client")
-        .version("1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Volker Schwaberow <volker@schwaberow.de>")
         .about("Searches for hash cleartext counterparts in HashMob's database")
         .arg(
@@ -86,67 +86,35 @@ async fn main() -> Result<(), HashMobError> {
 
     let quiet = matches.get_flag("quiet");
     let no_formatting = matches.get_flag("noformatting");
-    let no_color = matches.get_flag("nocolor") || !atty::is(atty::Stream::Stdout);
+    let disable_color = matches.get_flag("nocolor") || !atty::is(atty::Stream::Stdout);
 
-    if no_color {
+    if disable_color {
         colored::control::set_override(false);
     }
 
     let api_key = env::var("HASHMOB_KEY")?;
-
-    if api_key.is_empty() {
-        eprintln!("{}", "ERROR: API key not found".bright_red().bold());
-        eprintln!(
-            "{}",
-            "A valid API key must be specified in the HASHMOB_KEY environment variable.".yellow()
-        );
-        eprintln!("\n{}", "To set the API key, use:".cyan());
-        eprintln!("    {}", "export HASHMOB_KEY=your-api-key-here".green());
-        return Err(HashMobError::EnvVar(std::env::VarError::NotPresent));
+    if api_key.trim().is_empty() {
+        print_missing_api_key_error();
+        return Err(HashMobError::EnvVar(env::VarError::NotPresent));
     }
 
-    let hashes = if let Some(input) = matches.get_one::<String>("INPUT") {
-        if let Ok(metadata) = std::fs::metadata(input) {
-            if metadata.is_file() {
-                if !quiet {
-                    println!("{}", format!("Reading hashes from file: {}", input).cyan());
-                }
-                read_hashes_from_file(input)?
-            } else {
-                input.split(',').map(str::trim).map(String::from).collect()
-            }
-        } else {
-            input.split(',').map(str::trim).map(String::from).collect()
-        }
-    } else if atty::isnt(atty::Stream::Stdin) {
-        io::stdin().lock().lines().filter_map(Result::ok).collect()
-    } else {
+    let hashes = read_hashes(matches.get_one::<String>("INPUT"))?;
+    if hashes.is_empty() {
         eprintln!("{}", "Error: No input provided".bright_red().bold());
         eprintln!("{}", "Usage: hashmob [-q] [-n] <hash input>".yellow());
         eprintln!("{}", "Run with --help for full usage details.".cyan());
         return Err(HashMobError::NoInput);
-    };
+    }
 
     let client = Client::new();
     let req_payload = HashRequest { hashes };
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ")
-            .template("{spinner:.green} {msg}")
-            .unwrap(),
-    );
-    pb.set_message("Querying HashMob database...");
-
+    let pb = init_progress_spinner("Querying HashMob database...");
     let resp = client
         .post(API_URL)
         .header("Content-Type", "application/json")
         .header("accept", "*/*")
-        .header(
-            "User-Agent",
-            "rusthashmob v1.0 (github.com/vschwaberow/hashmob)",
-        )
+        .header("User-Agent", "rusthashmob v1.0 (github.com/vschwaberow/hashmob)")
         .header("api-key", &api_key)
         .header("X-CSRF-TOKEN", "")
         .json(&req_payload)
@@ -157,15 +125,7 @@ async fn main() -> Result<(), HashMobError> {
     pb.finish_with_message("Query completed");
 
     if quiet {
-        let api_response: ApiResponse = serde_json::from_str(&resp_body)?;
-        if api_response.data.found.is_empty() {
-            println!("{}", "No matches found in the database.".yellow());
-        } else {
-            println!("{}", "Matches found:".green());
-            api_response.data.found.iter().for_each(|found| {
-                println!("{}:{}", found.hash.cyan(), found.plain.green());
-            });
-        }
+        process_quiet_mode(&resp_body)?;
     } else if no_formatting {
         println!("{}", resp_body);
     } else {
@@ -176,12 +136,72 @@ async fn main() -> Result<(), HashMobError> {
     Ok(())
 }
 
-fn read_hashes_from_file(path: &str) -> io::Result<Vec<String>> {
+fn init_progress_spinner(message: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ")
+            .template("{spinner:.green} {msg}")
+            .unwrap(),
+    );
+    pb.set_message(message.to_string());
+    pb
+}
+
+fn read_hashes(input: Option<&String>) -> Result<Vec<String>, HashMobError> {
+    if let Some(input) = input {
+        if let Ok(metadata) = std::fs::metadata(input) {
+            if metadata.is_file() {
+                println!("{}", format!("Reading hashes from file: {}", input).cyan());
+                return read_hashes_from_file(input);
+            }
+        }
+        Ok(input
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect())
+    } else if !atty::is(atty::Stream::Stdin) {
+        let stdin_hashes = io::stdin()
+            .lock()
+            .lines()
+            .filter_map(Result::ok)
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        Ok(stdin_hashes)
+    } else {
+        Err(HashMobError::NoInput)
+    }
+}
+
+fn read_hashes_from_file(path: &str) -> Result<Vec<String>, HashMobError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    Ok(reader
+    let hashes = reader
         .lines()
         .filter_map(|line| line.ok())
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<String>>())
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    Ok(hashes)
+}
+
+fn process_quiet_mode(resp_body: &str) -> Result<(), HashMobError> {
+    let api_response: ApiResponse = serde_json::from_str(resp_body)?;
+    if api_response.data.found.is_empty() {
+        println!("{}", "No matches found in the database.".yellow());
+    } else {
+        println!("{}", "Matches found:".green());
+        for found in api_response.data.found {
+            println!("{}:{}", found.hash.cyan(), found.plain.green());
+        }
+    }
+    Ok(())
+}
+
+fn print_missing_api_key_error() {
+    eprintln!("{}", "ERROR: API key not found".bright_red().bold());
+    eprintln!("{}", "A valid API key must be specified in the HASHMOB_KEY environment variable.".yellow());
+    eprintln!("\n{}", "To set the API key, use:".cyan());
+    eprintln!("    {}", "export HASHMOB_KEY=your-api-key-here".green());
 }
